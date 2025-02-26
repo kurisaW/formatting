@@ -194,11 +194,10 @@ def format_codes(filename):
         while lines and not lines[-1].strip():
             lines.pop()       
 
-        for line in lines:
+        for i, line in enumerate(lines):
             line = tab2spaces(line)
-            line = formattail(line, is_last_line = (line == lines[-1]))
+            line = formattail(line, is_last_line = (i == (len(lines) - 1)))
             line = move_braces_to_next_line(line)
-
             file_temp.write(line)
         file_temp.close()
         file.close()
