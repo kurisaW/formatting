@@ -17,6 +17,7 @@
 # 2023-04-24     BernardXiong 仅当文件有修改时才更新copyright year信息
 # 2024-03-25     ZhuDongmei   优化版权年份修改，增加将行注释改成块注释
 # 2024-11-15     wumingzi     增加去除endline空行功能
+# 2025-06-13     kurisaW      优化对数组或结构体以及预处理指令的空行处理
 
 # 本文件会自动对指定路径下的所有文件包括子文件夹的文件（.c/.h/.cpp/.hpp）进行扫描
 #   1)将源文件编码统一为UTF-8
@@ -36,7 +37,6 @@ import chardet
 import datetime
 import filecmp
 from comment_parser import comment_parser
-
 
 # 用空格代替TAB键
 # 这里并不是简单的将TAB替换成4个空格
@@ -61,58 +61,87 @@ def tab2spaces(line):
 
 
 # 删除每行末尾多余的空格 统一使用\n作为结尾
-def formattail(line, is_last_line = False):
+def formattail(line, is_last_line=False):
+    # 保留预处理指令后的换行（包括所有#开头的指令）
+    if line.lstrip().startswith('#'):
+        return line.rstrip() + '\n'
+    
+    # 保留宏定义后的换行（增强的预处理指令判断）
+    if re.match(r'^\s*#\s*(define|if|elif|else|endif|error|warning)', line.lstrip()):
+        return line.rstrip() + '\n'
+
+    # 保留空行（只包含空格/制表符的行）
+    if not line.strip():
+        return '\n'
+    
     line = line.rstrip()
-    if(is_last_line == True):
-        return line
-    line = line + '\n'
-    return line
+    if is_last_line:
+        return line + '\n'  # 确保最后一行也有换行
+    return line + '\n'
 
 # 将大括号移至下一行
 def move_braces_to_next_line(line):
+    # 如果是预处理指令行，不做处理
+    if line.lstrip().startswith('#'):
+        return line
+    
+    # 跳过空行
+    if not line.strip():
+        return line
+    
     # 检查是否有右括号和花括号
     if ')' in line and '{' in line:
-        # 获取最后一个匹配的字符
         right_bracket_index = line.rindex(')')
         brace_index = line.rindex('{')
 
-        # 如果花括号在右括号后面，将花括号移到和之前行的第一个字母对齐的位置
+        # 如果花括号在右括号后面
         if brace_index > right_bracket_index:
-            # 找到之前行的第一个字母的索引
+            # 提取花括号及其后的内容
+            brace_content = line[brace_index:].strip()
+            # 检查是否为数组或结构体初始化
+            if brace_content.startswith('{') and '}' in brace_content:
+                # 简单检查花括号内的内容，允许数字、逗号、空格、标识符等
+                inner_content = brace_content[1:brace_content.index('}')]
+                if re.match(r'^\s*[\w\d,\s]*\s*$', inner_content):
+                    # 可能是数组或结构体初始化，保留原始行
+                    return line
+
+            # 非数组初始化，继续移动花括号
             prev_line_index = line[:brace_index].rfind('\n') + 1
             first_letter_index = prev_line_index
-            while line[first_letter_index] == ' ':
+            while first_letter_index < len(line) and line[first_letter_index] == ' ':
                 first_letter_index += 1
 
-            # 遍历 brace_index 与 right_bracket_index 之间的字符，如果是空格予以剔除
-            while line[right_bracket_index + 1] == ' ':
+            # 清理右括号和花括号之间的多余空格
+            while brace_index > right_bracket_index + 1 and line[right_bracket_index + 1] == ' ':
                 line = line[:right_bracket_index + 1] + line[right_bracket_index + 2:]
                 brace_index -= 1
 
-            # 移动花括号到第一个字母对齐的位置
-            line = line[:brace_index] + '\n' + ' ' * first_letter_index + line[brace_index:]
+            # 移动花括号到下一行，与第一个非空格字符对齐
+            line = line[:brace_index] + '\n' + ' ' * (first_letter_index - prev_line_index) + line[brace_index:]
     return line
 
 #搜索Real-Thread/RT-Thread版权信息的截至年份修改至今年
 def change_rtt_copyright_year(line):
     """
     example:
-    replace Copyright (c) 2006-2023 to Copyright (c) 2006-2024
-    replace Copyright (c) 2006 to  Copyright (c) 2006-2024
-    replace Copyright (C) 2006 to  Copyright (c) 2006-2024
-    replace Copyright (C) 2006, to  Copyright (c) 2006-2024
-    replace Copyright (C) 2006-2023, to  Copyright (c) 2006-2024
+    replace Copyright (c) 2006-2023, to Copyright (c) 2006-2025,
+    replace Copyright (c) 2006 to Copyright (c) 2006-2025,
+    replace Copyright (C) 2006 to Copyright (c) 2006-2025,
+    replace Copyright (C) 2006, to Copyright (c) 2006-2025,
+    replace Copyright (C) 2006-2023 to Copyright (c) 2006-2025,
     """
     sec_year = str(datetime.datetime.now().year)
     if re.search("Copyright", line, re.IGNORECASE) \
         and ('Real-Thread' in line or 'RT-Thread' in line):
-        search_pattern = r"Copyright \([cC]\) (\d{4})(?:-(\d{4},?))?"
+        search_pattern = r"Copyright \([cC]\) (\d{4})(?:-(\d{4}))?(,?)"
         match = re.search(search_pattern, line, re.IGNORECASE)
         if match:
-            copyright_info = r'Copyright (c) ' + match.group(1) + "-" + sec_year
+            start_year = match.group(1)
+            comma = match.group(3) if match.group(3) else ','  # 保留原始逗号或默认添加
+            copyright_info = f'Copyright (c) {start_year}-{sec_year}{comma}'
             line = re.sub(search_pattern, copyright_info, line)
     return line
-
 
 def get_line_comment_no(filename):
     """
@@ -180,35 +209,55 @@ def format_copyright_year(filename):
 def format_codes(filename):
     try:
         filepath = os.path.dirname(filename)
-        # 将temp_file放在和filename相同的路径下
         temp_file = filepath + "temp"
         file = open(filename, 'r', encoding='utf-8')
         file_temp = open(temp_file, 'w', encoding='utf-8')
 
-         # 逐行读取文件内容
+        # 逐行读取文件内容
         lines = []
         for line in file:
             lines.append(line)
         
-        # 从末尾开始删除空行
-        while lines and not lines[-1].strip():
-            lines.pop()       
+        # 处理空行插入逻辑
+        i = 0
+        while i < len(lines) - 1:
+            # 如果当前行是 } 且下一行不是 else if 或 else
+            if lines[i].strip() == '}' and \
+               not lines[i+1].lstrip().startswith(('else if', 'else')):
+                # 检查下一行是否可能是函数定义
+                if re.match(r'^\w.*\(.*\)\s*\{?$', lines[i+1].lstrip()):
+                    # 确保中间有一个空行
+                    if lines[i+1].strip() and lines[i].strip():
+                        lines.insert(i+1, '\n')
+                        i += 1  # 跳过插入的空行
+            i += 1
 
-        for i, line in enumerate(lines):
+        # 从末尾开始删除多余空行（保留最后一个空行）
+        while len(lines) > 1 and not lines[-1].strip() and not lines[-2].strip():
+            lines.pop()
+            
+        # 确保文件以单个空行结束
+        if lines and lines[-1].strip():
+            lines.append('\n')
+        elif len(lines) > 1 and not lines[-1].strip() and not lines[-2].strip():
+            lines = lines[:-1]
+
+        for line in lines:
             line = tab2spaces(line)
-            line = formattail(line, is_last_line = (i == (len(lines) - 1)))
+            line = formattail(line, is_last_line=(line == lines[-1]))
             line = move_braces_to_next_line(line)
             file_temp.write(line)
+        
         file_temp.close()
         file.close()
 
         if filecmp.cmp(filename, temp_file):
-            os.remove(temp_file) # same file, no modification
+            os.remove(temp_file)  # same file, no modification
         else:
             os.remove(filename)
             os.rename(temp_file, filename)
 
-        format_copyright_year(filename) # re-format for copyright year information
+        format_copyright_year(filename)
         convert_line2block_comment(filename)
 
     except UnicodeDecodeError:
@@ -219,7 +268,6 @@ def format_codes(filename):
         print("编码失败，该文件处理失败" + filename)
         file_temp.close()
         file.close()
-
 
 def get_encode_info(file):
     encoding = None
