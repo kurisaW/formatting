@@ -84,42 +84,42 @@ def move_braces_to_next_line(line):
     # 如果是预处理指令行，不做处理
     if line.lstrip().startswith('#'):
         return line
-    
+
     # 跳过空行
     if not line.strip():
         return line
-    
-    # 检查是否有右括号和花括号
-    if ')' in line and '{' in line:
+
+    # 处理 "else if (...) {" 或 "else {" 的情况
+    if re.match(r'^\s*else(\s+if\s*\(.*\))?\s*{', line):
+        indent = len(line) - len(line.lstrip())
+        # 去掉末尾的 {，换行后补上缩进
+        line = re.sub(r'\s*{\s*$', '\n' + ' ' * indent + '{', line)
+        return line
+
+    # 检查是否有右括号和花括号，且不是 else if 或 else 语句
+    if ')' in line and '{' in line and not line.lstrip().startswith(('else if', 'else')):
         right_bracket_index = line.rindex(')')
         brace_index = line.rindex('{')
 
-        # 如果花括号在右括号后面
         if brace_index > right_bracket_index:
-            # 提取花括号及其后的内容
             brace_content = line[brace_index:].strip()
-            # 检查是否为数组或结构体初始化
             if brace_content.startswith('{') and '}' in brace_content:
-                # 简单检查花括号内的内容，允许数字、逗号、空格、标识符等
                 inner_content = brace_content[1:brace_content.index('}')]
                 if re.match(r'^\s*[\w\d,\s]*\s*$', inner_content):
-                    # 可能是数组或结构体初始化，保留原始行
                     return line
 
-            # 非数组初始化，继续移动花括号
             prev_line_index = line[:brace_index].rfind('\n') + 1
             first_letter_index = prev_line_index
             while first_letter_index < len(line) and line[first_letter_index] == ' ':
                 first_letter_index += 1
 
-            # 清理右括号和花括号之间的多余空格
             while brace_index > right_bracket_index + 1 and line[right_bracket_index + 1] == ' ':
                 line = line[:right_bracket_index + 1] + line[right_bracket_index + 2:]
                 brace_index -= 1
 
-            # 移动花括号到下一行，与第一个非空格字符对齐
             line = line[:brace_index] + '\n' + ' ' * (first_letter_index - prev_line_index) + line[brace_index:]
     return line
+
 
 #搜索Real-Thread/RT-Thread版权信息的截至年份修改至今年
 def change_rtt_copyright_year(line):
@@ -166,13 +166,57 @@ def convert_line2block_comment(filename):
     if comment_line_no_list:
         with open(filename, 'r') as fr:
             lines = fr.readlines()
-            for line_no_list in comment_line_no_list:
-                comment_index = lines[line_no_list - 1].find('//')
-                if lines[line_no_list - 1][comment_index + 2] == ' ':
-                    lines[line_no_list - 1] =  lines[line_no_list - 1].replace('//', '/*',1)
-                else:
-                    lines[line_no_list - 1] =  lines[line_no_list - 1].replace('//', '/* ',1)               
-                lines[line_no_list - 1] =  lines[line_no_list - 1].rstrip('*/\n') + ' */' + '\n'
+
+        # Sort the list to ensure order
+        comment_line_no_list.sort()
+
+        # Group consecutive line numbers
+        groups = []
+        current_group = []
+        for no in comment_line_no_list:
+            if not current_group or no == current_group[-1] + 1:
+                current_group.append(no)
+            else:
+                groups.append(current_group)
+                current_group = [no]
+        if current_group:
+            groups.append(current_group)
+
+        for group in groups:
+            if len(group) == 1:
+                line_no = group[0]
+                line_idx = line_no - 1
+                line = lines[line_idx]
+                comment_index = line.find('//')
+                if comment_index != -1:
+                    has_space = (comment_index + 2 < len(line)) and (line[comment_index + 2] == ' ')
+                    if has_space:
+                        lines[line_idx] = line.replace('//', '/*', 1)
+                    else:
+                        lines[line_idx] = line.replace('//', '/* ', 1)
+                    lines[line_idx] = lines[line_idx].rstrip() + ' */' + '\n'
+            else:
+                # Multi-line group
+                for i, line_no in enumerate(group):
+                    line_idx = line_no - 1
+                    line = lines[line_idx]
+                    comment_index = line.find('//')
+                    if comment_index != -1:
+                        has_space = (comment_index + 2 < len(line)) and (line[comment_index + 2] == ' ')
+                        if i == 0:
+                            # First line: replace // with /* or /* 
+                            if has_space:
+                                replace_str = '/*'
+                            else:
+                                replace_str = '/* '
+                        else:
+                            # Intermediate lines: replace // with '  '
+                            replace_str = '  '
+                        lines[line_idx] = line[:comment_index] + replace_str + line[comment_index + 2:].rstrip() + '\n'
+                # Add closing */ on a new line, indented to match the first line's indent
+                first_line_idx = group[0] - 1
+                indent = len(lines[first_line_idx]) - len(lines[first_line_idx].lstrip())
+                lines.insert(group[-1], ' ' * indent + '*/' + '\n')
 
         with open(filename, 'w') as file:
             file.writelines(lines)
@@ -205,6 +249,14 @@ def format_copyright_year(filename):
         file_temp.close()
         file.close()
 
+def add_space_after_comma(line):
+    # 跳过预处理指令
+    if line.lstrip().startswith('#'):
+        return line
+    # 在逗号后如果没有空格，则补上一个
+    # 注意避免 ",)" 这种情况
+    return re.sub(r',(?=[^\s\)])', ', ', line)
+
 # 对单个文件进行格式整理
 def format_codes(filename):
     try:
@@ -233,19 +285,14 @@ def format_codes(filename):
             i += 1
 
         # 从末尾开始删除多余空行（保留最后一个空行）
-        while len(lines) > 1 and not lines[-1].strip() and not lines[-2].strip():
+        while lines and not lines[-1].strip():
             lines.pop()
-            
-        # 确保文件以单个空行结束
-        if lines and lines[-1].strip():
-            lines.append('\n')
-        elif len(lines) > 1 and not lines[-1].strip() and not lines[-2].strip():
-            lines = lines[:-1]
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             line = tab2spaces(line)
-            line = formattail(line, is_last_line=(line == lines[-1]))
+            line = formattail(line, is_last_line=(idx == len(lines)-1))
             line = move_braces_to_next_line(line)
+            line = add_space_after_comma(line)   # <== 新增这一步
             file_temp.write(line)
         
         file_temp.close()
